@@ -20,6 +20,9 @@ app.use(session({
 }));
 
 async function initDb() {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is missing. In Railway, add a reference to your PostgreSQL service: ${{Postgres.DATABASE_URL}} (replace Postgres with your database service name).');
+  }
   await pool.query(`CREATE TABLE IF NOT EXISTS members (id SERIAL PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS pages (id SERIAL PRIMARY KEY, slug TEXT UNIQUE NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', created_by INTEGER REFERENCES members(id), created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS contributions (id SERIAL PRIMARY KEY, member_id INTEGER REFERENCES members(id), page_id INTEGER REFERENCES pages(id), action TEXT NOT NULL, summary TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now());

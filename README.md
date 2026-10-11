@@ -15,7 +15,7 @@ The app creates its tables and starter page on first launch. The homepage and al
 
 1. Push this folder to a GitHub repository.
 2. In Railway, create a project and deploy the repository as a service.
-3. Add a PostgreSQL service to the same project. Railway exposes its `DATABASE_URL` to services when you add the variable reference.
+3. Add a PostgreSQL service to the same project. In the web service's **Variables** tab, add a reference variable named `DATABASE_URL` with a value like `${{Postgres.DATABASE_URL}}`. Replace `Postgres` with the exact name of your database service. Railway requires this reference; without it the app tries localhost and cannot connect.
 4. Set `SESSION_SECRET` to a long random value in the web service variables.
 5. Deploy. Railway uses `npm start`; `/health` is the health check.
 
