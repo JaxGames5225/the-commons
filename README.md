@@ -13,7 +13,7 @@ Prompt submissions stay on the main page. A small in-memory queue lets two build
 3. Run `npm install` and `npm start`.
 4. Open `http://localhost:3000` and start editing the Commons.
 
-The app creates its single site record on first launch. Existing Commons canvas and subpage content is folded into that record the first time the new version starts. New source is generated with the model in `OPENAI_MODEL` (defaults to `gpt-6-luna` with reasoning disabled for faster edits).
+The app creates its single site record on first launch with an empty HTML document. It no longer reads or migrates the old `pages` table; the existing `commons_site` row remains the source of truth. New source is generated with the model in `OPENAI_MODEL` (defaults to `gpt-6-luna` with reasoning disabled for faster edits).
 
 ## Deploy on Railway
 

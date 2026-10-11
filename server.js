@@ -12,6 +12,7 @@ const JOB_TTL_MS = 30 * 60 * 1000;
 const buildQueue = [];
 const buildJobs = new Map();
 let activeBuilds = 0;
+const EMPTY_SITE_CODE = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>The Commons</title></head><body></body></html>';
 
 app.set('trust proxy', 1);
 app.use(express.urlencoded({ extended: false, limit: '160kb' }));
@@ -22,21 +23,6 @@ const shell = content => `<!doctype html><html><head><meta charset="utf-8"><meta
 
 function errorText(code) {
   return ({key:'AI key needed — add OPENAI_API_KEY in Railway Variables',auth:'AI key is invalid — check OPENAI_API_KEY in Railway Variables',busy:'The builder is busy or the shared site is too large — try again shortly',failed:'Could not build that. Try again'})[code] || '';
-}
-
-function initialSiteCode(legacyPages) {
-  const canvas = legacyPages.find(page => page.slug === 'canvas');
-  let body = canvas?.body || '';
-  const subpages = legacyPages.filter(page => page.slug !== 'canvas');
-  for (const page of subpages) {
-    const slug = String(page.slug).replace(/[^a-z0-9-]/gi, '');
-    body += `<section id="page-${slug}"><h1>${escapeAttr(page.title)}</h1>${page.body || ''}</section>`;
-  }
-  for (const page of subpages) {
-    const slug = String(page.slug).replace(/[^a-z0-9-]/gi, '');
-    body = body.replaceAll(`/p/${page.slug}`, `#page-${slug}`);
-  }
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>The Commons</title></head><body>${body}</body></html>`;
 }
 
 async function initDb() {
@@ -50,14 +36,7 @@ async function initDb() {
   const { rows: existing } = await pool.query('SELECT 1 FROM commons_site WHERE id=1');
   if (existing.length) return;
 
-  // One-time migration: fold the old canvas and any subpages into one HTML document.
-  const { rows: tables } = await pool.query("SELECT to_regclass('public.pages') AS pages_table");
-  let code = initialSiteCode([]);
-  if (tables[0]?.pages_table) {
-    const { rows: legacyPages } = await pool.query('SELECT slug,title,body FROM pages ORDER BY created_at, id');
-    if (legacyPages.length) code = initialSiteCode(legacyPages);
-  }
-  await pool.query('INSERT INTO commons_site(id,code) VALUES(1,$1) ON CONFLICT(id) DO NOTHING', [code]);
+  await pool.query('INSERT INTO commons_site(id,code) VALUES(1,$1) ON CONFLICT(id) DO NOTHING', [EMPTY_SITE_CODE]);
 }
 
 function renderCanvas(code, error='') {
@@ -76,8 +55,8 @@ app.get('/builds/:id', (req,res) => {
   res.json({state:job.state,message:job.message});
 });
 app.get('/',async(req,res)=>{
-  try { const {rows}=await pool.query('SELECT code FROM commons_site WHERE id=1');res.type('html').send(renderCanvas(rows[0]?.code||initialSiteCode([]),errorText(req.query.error))); }
-  catch(e){console.error(e);res.status(500).type('html').send(renderCanvas(initialSiteCode([]),'The canvas is loading — try again'));}
+  try { const {rows}=await pool.query('SELECT code FROM commons_site WHERE id=1');res.type('html').send(renderCanvas(rows[0]?.code||EMPTY_SITE_CODE,errorText(req.query.error))); }
+  catch(e){console.error(e);res.status(500).type('html').send(renderCanvas(EMPTY_SITE_CODE,'The canvas is loading — try again'));}
 });
 
 app.post('/contribute',async(req,res)=>{
@@ -85,7 +64,7 @@ app.post('/contribute',async(req,res)=>{
   if(!idea)return res.status(400).json({message:'Type something to add or change first.'});
   if(!process.env.OPENAI_API_KEY)return res.status(503).json({message:errorText('key')});
   buildJobs.forEach((job,id)=>{if(Date.now()-job.createdAt>JOB_TTL_MS&&job.state!=='queued'&&job.state!=='building')buildJobs.delete(id);});
-  if(buildQueue.length>=MAX_QUEUED_BUILDS)return res.status(503).json({message:'The Commons is busy right now. Your request is still in the box — try sending it again in a moment.'});
+  if(buildQueue.length>=MAX_QUEUED_BUILDS)return res.status(503).json({message:'The Commons queue is full right now. Your prompt is still here — try again in a moment.'});
   const job={id:randomUUID(),idea,createdAt:Date.now(),state:'queued',message:''};
   buildJobs.set(job.id,job);buildQueue.push(job);drainBuildQueue();
   res.status(202).json({statusUrl:`/builds/${job.id}`});
