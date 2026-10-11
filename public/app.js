@@ -2,7 +2,7 @@
   const form = document.querySelector('.prompt');
   const input = form?.querySelector('input[name="idea"]');
   const button = form?.querySelector('button');
-  const statusText = form?.querySelector('.prompt-status');
+  const toast = document.querySelector('.toast');
   const bubble = document.querySelector('.queue-bubble');
   const popup = document.querySelector('.queue-popup');
   const closeButton = document.querySelector('.queue-close');
@@ -33,23 +33,47 @@
     }
   } catch { requesterId = newRequesterId(); }
 
-  function setStatus(state, message) {
-    form.dataset.state = state;
-    form.setAttribute('aria-busy', 'true');
-    if (statusText) statusText.textContent = message;
-    input.placeholder = message;
-    button.setAttribute('aria-label', message);
+  let toastTimer;
+  function showToast(message, kind = 'success') {
+    if (!toast) return;
+    window.clearTimeout(toastTimer);
+    toast.textContent = message;
+    toast.dataset.kind = kind;
+    toast.classList.add('is-visible');
+    toastTimer = window.setTimeout(() => toast.classList.remove('is-visible'), 2200);
   }
-  function restore(idea, message) {
-    delete form.dataset.state;
-    form.removeAttribute('aria-busy');
-    input.readOnly = false;
-    input.value = idea;
-    input.placeholder = message;
-    button.disabled = false;
-    button.textContent = '↗';
-    button.setAttribute('aria-label', 'Build');
-    input.focus();
+  async function watchBuild(statusUrl) {
+    for (;;) {
+      await sleep(2200);
+      try {
+        const response = await fetch(statusUrl, { cache: 'no-store' });
+        if (!response.ok) continue;
+        const status = await response.json();
+        if (status.state === 'done') {
+          await refreshCanvas();
+          refreshActive();
+          if (loadedHistory) loadHistory(true);
+          return;
+        }
+        if (status.state === 'failed') {
+          refreshActive();
+          if (loadedHistory) loadHistory(true);
+          showToast(status.message || 'Could not build that change', 'error');
+          return;
+        }
+      } catch { /* Keep checking; the queue itself remains the source of truth. */ }
+    }
+  }
+  async function refreshCanvas() {
+    try {
+      const response = await fetch('/', { cache: 'no-store' });
+      if (!response.ok) return;
+      const html = await response.text();
+      const documentCopy = new DOMParser().parseFromString(html, 'text/html');
+      const updatedFrame = documentCopy.querySelector('#canvas-frame');
+      const currentFrame = document.querySelector('#canvas-frame');
+      if (updatedFrame && currentFrame) currentFrame.srcdoc = updatedFrame.srcdoc;
+    } catch { /* A later page visit will show the latest saved canvas. */ }
   }
   function friendlyStatus(request) {
     if (request.status === 'building') return 'Building now';
@@ -131,8 +155,14 @@
   let loadedHistory = false;
   let loadingHistory = false;
   let historyHasMore = true;
+  let historyNeedsRefresh = false;
   async function loadHistory(reset = false) {
-    if (!historyList || loadingHistory || (!historyHasMore && !reset)) return;
+    if (!historyList) return;
+    if (loadingHistory) {
+      if (reset) historyNeedsRefresh = true;
+      return;
+    }
+    if (!historyHasMore && !reset) return;
     loadingHistory = true;
     if (loadingNote) loadingNote.hidden = false;
     if (endNote) endNote.hidden = true;
@@ -170,6 +200,10 @@
     } finally {
       loadingHistory = false;
       if (loadingNote) loadingNote.hidden = true;
+      if (historyNeedsRefresh) {
+        historyNeedsRefresh = false;
+        queueMicrotask(() => loadHistory(true));
+      }
     }
   }
   const historyObserver = sentinel && 'IntersectionObserver' in window
@@ -178,15 +212,19 @@
       }, { root: scrollBox, rootMargin: '100px' })
     : null;
   historyObserver?.observe(sentinel);
-  function popupOpen() { return !popup.hidden; }
+  function popupOpen() { return popup.classList.contains('is-open'); }
   function openPopup() {
-    popup.hidden = false;
+    popup.classList.add('is-open');
+    popup.setAttribute('aria-hidden', 'false');
+    popup.inert = false;
     bubble.setAttribute('aria-expanded', 'true');
     if (!loadedHistory) loadHistory();
     closeButton?.focus();
   }
   function closePopup() {
-    popup.hidden = true;
+    popup.classList.remove('is-open');
+    popup.setAttribute('aria-hidden', 'true');
+    popup.inert = true;
     bubble.setAttribute('aria-expanded', 'false');
     bubble.focus();
   }
@@ -199,15 +237,14 @@
   refreshActive();
   window.setInterval(refreshActive, 2500);
 
+  let submitting = false;
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (button.disabled) return;
+    if (submitting) return;
     const idea = input.value.trim();
     if (!idea) return;
+    submitting = true;
     button.disabled = true;
-    input.readOnly = true;
-    input.value = '';
-    setStatus('sending', 'Sending your idea…');
     try {
       const response = await fetch(form.action, {
         method: 'POST',
@@ -216,30 +253,19 @@
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || 'Could not queue that request. Try again.');
-      refreshActive();
-      if (loadedHistory) loadHistory(true);
-      setStatus('queued', 'In the queue — getting your change ready…');
-      for (;;) {
-        await sleep(1800);
-        const statusResponse = await fetch(data.statusUrl, { headers: { 'Accept': 'application/json' }, cache: 'no-store' });
-        if (!statusResponse.ok) throw new Error('Could not check the build status. Your prompt is still here.');
-        const status = await statusResponse.json();
-        if (status.state === 'queued') {
-          setStatus('queued', status.position > 1 ? `In the queue — ${status.position} requests ahead…` : 'In the queue — you’re next…');
-        } else if (status.state === 'building') {
-          setStatus('building', 'Building your change…');
-        } else if (status.state === 'done') {
-          setStatus('building', 'Publishing your change…');
-          window.location.replace('/');
-          return;
-        } else if (status.state === 'failed') {
-          throw new Error(status.message || 'Could not build that. Try again.');
-        }
-      }
+      input.value = '';
+      showToast('Added to queue');
+      await invalidateQueue();
+      void watchBuild(data.statusUrl);
     } catch (error) {
-      restore(idea, error.message || 'Could not build that. Try again.');
-      refreshActive();
-      if (loadedHistory) loadHistory(true);
+      showToast(error.message || 'Could not add that request', 'error');
+    } finally {
+      submitting = false;
+      button.disabled = false;
     }
   });
+  async function invalidateQueue() {
+    await refreshActive();
+    if (loadedHistory) await loadHistory(true);
+  }
 })();

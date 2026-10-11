@@ -24,8 +24,8 @@ html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#fff;font-f
 .queue-bubble{position:fixed;right:24px;bottom:26px;display:flex;align-items:center;gap:10px;height:48px;padding:0 11px 0 16px;border:1px solid #e4e4e7;border-radius:999px;background:#fff;color:#18181b;box-shadow:0 8px 30px #00000012,0 2px 6px #00000008;font:600 13px/1.2 Inter,ui-sans-serif,system-ui,sans-serif;cursor:pointer;transition:box-shadow .18s ease,transform .18s ease}
 .queue-bubble:hover{transform:translateY(-1px);box-shadow:0 10px 34px #00000018,0 3px 8px #0000000a}
 .queue-count{display:grid;place-items:center;min-width:24px;height:24px;padding:0 6px;border-radius:999px;background:#f1f1f2;color:#45454a;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}
-.queue-popup{position:fixed;right:24px;bottom:86px;width:min(390px,calc(100vw - 32px));height:min(570px,72vh);display:none;flex-direction:column;overflow:hidden;border:1px solid #e4e4e7;border-radius:18px;background:#fff;box-shadow:0 22px 70px #0000001c,0 4px 12px #0000000a}
-.queue-popup:not([hidden]){display:flex}
+.queue-popup{position:fixed;right:24px;bottom:86px;width:min(390px,calc(100vw - 32px));height:min(570px,72vh);display:flex;flex-direction:column;overflow:hidden;border:1px solid #e4e4e7;border-radius:18px;background:#fff;box-shadow:0 22px 70px #0000001c,0 4px 12px #0000000a;visibility:hidden;opacity:0;transform:translateY(8px) scale(.985);transform-origin:bottom right;pointer-events:none;transition:opacity .18s ease,transform .18s ease,visibility .18s ease}
+.queue-popup.is-open{visibility:visible;opacity:1;transform:translateY(0) scale(1);pointer-events:auto}
 .queue-header{display:flex;align-items:center;justify-content:space-between;flex:none;padding:15px 17px;border-bottom:1px solid #eeeeef}
 .queue-header h2{margin:0;font-size:14px;font-weight:650;letter-spacing:-.01em}
 .queue-close{display:grid;place-items:center;width:30px;height:30px;padding:0;border:0;border-radius:9px;background:transparent;color:#71717a;font:24px/1 Inter,ui-sans-serif,system-ui,sans-serif;cursor:pointer}
@@ -57,17 +57,12 @@ html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#fff;font-f
 .prompt input::placeholder{color:#92929a}
 .prompt button{position:relative;display:grid;place-items:center;flex:none;width:48px;height:48px;border:0;border-radius:14px;padding:0;background:#18181b;color:#fff;font:600 19px/1 Inter,ui-sans-serif,system-ui,sans-serif;cursor:pointer;transition:background .16s ease,transform .16s ease}
 .prompt button:hover:not(:disabled){transform:translateY(-1px);background:#333338}
-.prompt button:disabled{cursor:wait;opacity:.82}
-.prompt[data-state]:after{content:"";position:absolute;left:0;bottom:0;width:30%;height:2px;background:linear-gradient(90deg,transparent,#71717a,#18181b,transparent);animation:build-progress 1.3s ease-in-out infinite}
-.prompt[data-state] button{font-size:0}
-.prompt[data-state] button:after{content:"";width:17px;height:17px;border:2px solid #ffffff60;border-top-color:#fff;border-radius:50%;animation:build-spin .8s linear infinite}
-.prompt[data-state="queued"] button:after{border-top-color:#fcd34d}
-.prompt[data-state="queued"]{border-color:#d4d4d8}
-.prompt-status{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-@keyframes build-spin{to{transform:rotate(360deg)}}
-@keyframes build-progress{0%{transform:translateX(-115%)}100%{transform:translateX(440%)}}
-@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:3s!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
-@media(max-width:1000px){.queue-bubble{top:18px;right:18px;bottom:auto}.queue-popup{top:76px;right:18px;bottom:auto;max-height:calc(100vh - 94px)}}
+.prompt button:disabled{cursor:default;opacity:.65}
+.toast{position:fixed;z-index:20;top:14px;left:50%;max-width:calc(100vw - 28px);overflow:hidden;padding:7px 11px;border:1px solid #e4e4e7;border-radius:999px;background:rgba(255,255,255,.96);color:#3f3f46;box-shadow:0 5px 18px #00000012;font-size:12px;line-height:1.25;text-overflow:ellipsis;white-space:nowrap;opacity:0;transform:translate(-50%,-5px);pointer-events:none;transition:opacity .16s ease,transform .16s ease}
+.toast.is-visible{opacity:1;transform:translate(-50%,0)}
+.toast[data-kind="error"]{border-color:#fecaca;color:#991b1b}
+@media(prefers-reduced-motion:reduce){.queue-popup,.toast{transition:none}}
+@media(max-width:1000px){.queue-bubble{top:18px;right:18px;bottom:auto}.queue-popup{top:76px;right:18px;bottom:auto;max-height:calc(100vh - 94px);transform-origin:top right}}
 @media(max-width:600px){.queue-bubble{top:12px;right:12px;height:44px}.queue-popup{top:66px;right:10px;width:calc(100vw - 20px);height:min(520px,62vh);max-height:calc(100vh - 82px);border-radius:16px}.prompt{bottom:12px;width:calc(100vw - 24px);height:60px;padding:6px 8px 6px 18px;border-radius:18px}.prompt input{font-size:14px}.prompt button{width:46px;height:46px;border-radius:13px}}
 `;
 const shell = content => `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>The Commons</title><style>${css}</style></head><body>${content}<script src="/app.js" defer></script></body></html>`;
@@ -104,7 +99,7 @@ async function initDb() {
 
 function renderCanvas(code, error='') {
   const frame = `<iframe id="canvas-frame" title="Shared website" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${escapeAttr(lockHtml(code))}"></iframe>`;
-  return shell(`<main id="canvas">${frame}</main><aside class="queue-ui"><section class="queue-popup" id="queue-popup" aria-label="Community requests" hidden><header class="queue-header"><h2>Community requests</h2><button class="queue-close" type="button" aria-label="Close requests">×</button></header><div class="queue-scroll"><section class="queue-group"><h3>In the queue</h3><ol class="active-list"><li class="queue-empty">Loading…</li></ol></section><section class="queue-group"><h3>Recent requests</h3><ol class="history-list"></ol></section><p class="history-loading" hidden>Loading more…</p><p class="history-end" hidden>You’re all caught up.</p><div class="history-sentinel"></div></div></section><button class="queue-bubble" type="button" aria-expanded="false" aria-controls="queue-popup"><span>Queue</span><span class="queue-count" aria-label="Active requests">0</span></button></aside><form class="prompt" method="post" action="/contribute"><input name="idea" maxlength="2000" required placeholder="${escapeAttr(error || 'Add or change anything on the shared site…')}" aria-label="Describe what to build"><span class="prompt-status" role="status" aria-live="polite" aria-atomic="true"></span><button aria-label="Build">↗</button></form>`);
+  return shell(`<main id="canvas">${frame}</main><aside class="queue-ui"><section class="queue-popup" id="queue-popup" aria-label="Community requests" aria-hidden="true" inert><header class="queue-header"><h2>Community requests</h2><button class="queue-close" type="button" aria-label="Close requests">×</button></header><div class="queue-scroll"><section class="queue-group"><h3>In the queue</h3><ol class="active-list"><li class="queue-empty">Loading…</li></ol></section><section class="queue-group"><h3>Recent requests</h3><ol class="history-list"></ol></section><p class="history-loading" hidden>Loading more…</p><p class="history-end" hidden>You’re all caught up.</p><div class="history-sentinel"></div></div></section><button class="queue-bubble" type="button" aria-expanded="false" aria-controls="queue-popup"><span>Queue</span><span class="queue-count" aria-label="Active requests">0</span></button></aside><form class="prompt" method="post" action="/contribute"><input name="idea" maxlength="2000" required placeholder="${escapeAttr(error || 'Add or change anything on the shared site…')}" aria-label="Describe what to build"><button aria-label="Build">↗</button></form><div class="toast" role="status" aria-live="polite" aria-atomic="true"></div>`);
 }
 
 app.get('/health', (_req,res) => res.send('ok'));
