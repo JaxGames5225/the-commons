@@ -1,15 +1,15 @@
 # The Commons
 
-A shared, login-gated community website. Members can create new pages and add contributions to pages everyone can see.
+A shared community website. Visitors can create new pages and add contributions to pages everyone can see without signing in.
 
 ## Run locally
 
 1. Install Node.js 20+ and PostgreSQL.
 2. Create a PostgreSQL database and copy `.env.example` to `.env` with its connection URL and a long random session secret.
 3. Run `npm install` and `npm start`.
-4. Open `http://localhost:3000` and create the first member account.
+4. Open `http://localhost:3000` and start adding to the Commons.
 
-The app creates its tables and starter page on first launch. The homepage and all Commons pages require an account. Registration is currently open to anyone who reaches the site.
+The app creates its tables and starter page on first launch. The homepage and all Commons pages are available without an account. Contributions are shown as “A visitor.”
 
 ## Deploy on Railway
 
@@ -19,7 +19,7 @@ The app creates its tables and starter page on first launch. The homepage and al
 4. Set `SESSION_SECRET` to a long random value in the web service variables.
 5. Deploy. Railway uses `npm start`; `/health` is the health check.
 
-The database holds accounts, shared pages, contribution history, and reports. Keep the database private; only the web service needs its connection variable.
+The database holds shared pages, contribution history, and reports. Keep the database private; only the web service needs its connection variable.
 
 ## Current behavior
 

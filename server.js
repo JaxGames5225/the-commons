@@ -2,7 +2,6 @@ const express = require('express');
 const session = require('express-session');
 const PgSession = require('connect-pg-simple')(session);
 const { Pool } = require('pg');
-const bcrypt = require('bcryptjs');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -35,52 +34,33 @@ async function initDb() {
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const slugify = value => value.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 55) || 'new-page';
-const layout = (title, content, user) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · The Commons</title><link rel="stylesheet" href="/style.css"></head><body><header class="topbar"><a class="brand" href="/">✳ <span>the commons</span></a>${user ? `<div class="userbar"><span>${esc(user.display_name)}</span><form method="post" action="/logout"><button class="quiet">Log out</button></form></div>` : ''}</header>${content}<footer>Made by all of us <span>✳</span></footer><script src="/style.js" defer></script></body></html>`;
-const page = (res, status, title, content, user=null) => res.status(status).send(layout(title, content, user));
+const layout = (title, content) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · The Commons</title><link rel="stylesheet" href="/style.css"></head><body><header class="topbar"><a class="brand" href="/">✳ <span>the commons</span></a></header>${content}<footer>Made by all of us <span>✳</span></footer><script src="/style.js" defer></script></body></html>`;
+const page = (res, status, title, content) => res.status(status).send(layout(title, content));
 const flash = (req, key, value) => { req.session[key] = value; };
-function auth(req,res,next) { if (!req.session.user) return res.redirect('/login'); next(); }
 function note(req) { const msg=req.session.notice; delete req.session.notice; return msg ? `<div class="notice">${esc(msg)}</div>` : ''; }
 
 app.get('/health', (_req,res) => res.send('ok'));
 app.get('/style.css', (_req,res) => { res.type('text/css').send(CSS); });
-app.get('/login', (req,res) => {
-  if (req.session.user) return res.redirect('/');
-  page(res,200,'Sign in',`${note(req)}<main class="auth-wrap"><div class="auth-card"><div class="eyebrow">A PLACE WE MAKE TOGETHER</div><h1>Come on in.</h1><p class="muted">Sign in to explore and help build the Commons.</p><form method="post" action="/login" class="stack"><label>Email<input type="email" name="email" required autocomplete="email" placeholder="you@example.com"></label><label>Password<input type="password" name="password" required autocomplete="current-password" placeholder="Your password"></label><button class="primary">Sign in <span>↗</span></button></form><p class="switch">New around here? <a href="/signup">Create an account</a></p></div><div class="auth-art"><div class="sun"></div><div class="art-copy">A little place<br>for all of us.</div><span class="star s1">✳</span><span class="star s2">✳</span><span class="star s3">✷</span></div></main>`);
-});
-app.post('/login', async (req,res) => {
-  const { rows } = await pool.query('SELECT id,email,password_hash,display_name FROM members WHERE email=$1',[String(req.body.email||'').trim().toLowerCase()]);
-  if (!rows[0] || !await bcrypt.compare(String(req.body.password||''),rows[0].password_hash)) { flash(req,'notice','That email and password did not match.'); return res.redirect('/login'); }
-  req.session.user={id:rows[0].id,email:rows[0].email,display_name:rows[0].display_name}; res.redirect('/');
-});
-app.get('/signup', (req,res) => {
-  if (req.session.user) return res.redirect('/');
-  page(res,200,'Join',`${note(req)}<main class="auth-wrap"><div class="auth-card"><div class="eyebrow">YOUR COMMUNITY IS WAITING</div><h1>Make yourself at home.</h1><p class="muted">Create an account to enter the Commons.</p><form method="post" action="/signup" class="stack"><label>Your name<input name="name" maxlength="40" required autocomplete="name" placeholder="What should we call you?"></label><label>Email<input type="email" name="email" required autocomplete="email" placeholder="you@example.com"></label><label>Password<input type="password" name="password" minlength="8" required autocomplete="new-password" placeholder="At least 8 characters"></label><button class="primary">Join the Commons <span>↗</span></button></form><p class="switch">Already a member? <a href="/login">Sign in</a></p></div><div class="auth-art"><div class="sun"></div><div class="art-copy">A little place<br>for all of us.</div><span class="star s1">✳</span><span class="star s2">✳</span><span class="star s3">✷</span></div></main>`);
-});
-app.post('/signup', async (req,res) => {
-  const name=String(req.body.name||'').trim().slice(0,40), email=String(req.body.email||'').trim().toLowerCase(), password=String(req.body.password||'');
-  if(!name || !email || password.length<8) { flash(req,'notice','Please add your name, a valid email, and a password with at least 8 characters.'); return res.redirect('/signup'); }
-  try { const hash=await bcrypt.hash(password,12); const {rows}=await pool.query('INSERT INTO members(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name',[email,hash,name]); req.session.user=rows[0]; res.redirect('/'); }
-  catch(e) { if(e.code==='23505') { flash(req,'notice','There is already an account with that email.'); return res.redirect('/login'); } throw e; }
-});
-app.post('/logout',(req,res)=>req.session.destroy(()=>res.redirect('/login')));
+app.get(['/login','/signup'], (_req,res) => res.redirect('/'));
+app.post(['/login','/signup','/logout'], (_req,res) => res.redirect('/'));
 
-app.get('/',auth,async(req,res)=>{
-  const [pages,activity]=await Promise.all([pool.query('SELECT p.*,m.display_name FROM pages p LEFT JOIN members m ON p.created_by=m.id ORDER BY p.updated_at DESC'),pool.query('SELECT c.*,m.display_name,p.title FROM contributions c JOIN members m ON c.member_id=m.id LEFT JOIN pages p ON c.page_id=p.id ORDER BY c.created_at DESC LIMIT 8')]);
+app.get('/',async(req,res)=>{
+  const [pages,activity]=await Promise.all([pool.query('SELECT p.*,m.display_name FROM pages p LEFT JOIN members m ON p.created_by=m.id ORDER BY p.updated_at DESC'),pool.query("SELECT c.*,COALESCE(m.display_name,'A visitor') AS display_name,p.title FROM contributions c LEFT JOIN members m ON c.member_id=m.id LEFT JOIN pages p ON c.page_id=p.id ORDER BY c.created_at DESC LIMIT 8")]);
   const cards=pages.rows.map(p=>`<a class="page-card" href="/p/${encodeURIComponent(p.slug)}"><span class="card-icon">${icon(p.title)}</span><span class="card-copy"><b>${esc(p.title)}</b><small>by ${esc(p.display_name||'the community')}</small></span><span class="arrow">↗</span></a>`).join('');
   const feed=activity.rows.map(a=>`<div class="activity-item"><span class="activity-dot"></span><div><b>${esc(a.display_name)}</b> ${esc(a.summary)}<small>${timeAgo(a.created_at)}</small></div></div>`).join('') || '<p class="muted">The first contribution could be yours.</p>';
   const content=`<main class="shell">${note(req)}<section class="hero"><div class="eyebrow"><span class="live-dot"></span> ONE SHARED PLACE · ${pages.rows.length} PAGES</div><h1>A corner of the<br>internet <em>we make.</em></h1><p>Dream up a page, a club, a tiny useful thing. Tell the Commons and help it grow.</p><form class="prompt" method="post" action="/contribute"><span class="prompt-spark">✳</span><input name="idea" maxlength="500" required placeholder="What should we add to the Commons?"><button aria-label="Add to the Commons">Send <span>↗</span></button></form><div class="suggestions"><span>Try:</span><button type="button" data-fill="Make a page for sharing neighborhood recipes">a recipe page</button><button type="button" data-fill="Make a page for posting little wins">a tiny wins wall</button><button type="button" data-fill="Make a page for recommending books">a book club</button></div></section><section class="content-grid"><div><div class="section-heading"><div><div class="eyebrow">GROWING TOGETHER</div><h2>Explore the Commons</h2></div><span class="count">${pages.rows.length} ${pages.rows.length===1?'page':'pages'}</span></div><div class="page-grid">${cards}</div></div><aside class="activity"><div class="eyebrow">HAPPENING HERE</div><h2>Latest additions</h2><div class="feed">${feed}</div><div class="community-note"><span>✳</span><p>Everyone belongs here.<br><b>Leave things better than you found them.</b></p></div></aside></section></main>`;
-  page(res,200,'Home',content,req.session.user);
+  page(res,200,'Home',content);
 });
 
-app.get('/p/:slug',auth,async(req,res)=>{
+app.get('/p/:slug',async(req,res)=>{
   const {rows}=await pool.query('SELECT p.*,m.display_name FROM pages p LEFT JOIN members m ON p.created_by=m.id WHERE p.slug=$1',[req.params.slug]);
-  if(!rows[0]) return page(res,404,'Page not found',`<main class="shell"><a class="back" href="/">← Commons</a><h1>Page not found</h1></main>`,req.session.user);
-  const p=rows[0], {rows:history}=await pool.query('SELECT c.*,m.display_name FROM contributions c JOIN members m ON c.member_id=m.id WHERE c.page_id=$1 ORDER BY c.created_at DESC LIMIT 8',[p.id]);
+  if(!rows[0]) return page(res,404,'Page not found',`<main class="shell"><a class="back" href="/">← Commons</a><h1>Page not found</h1></main>`);
+  const p=rows[0], {rows:history}=await pool.query("SELECT c.*,COALESCE(m.display_name,'A visitor') AS display_name FROM contributions c LEFT JOIN members m ON c.member_id=m.id WHERE c.page_id=$1 ORDER BY c.created_at DESC LIMIT 8",[p.id]);
   const h=history.map(c=>`<div class="activity-item"><span class="activity-dot"></span><div><b>${esc(c.display_name)}</b> ${esc(c.summary)}<small>${timeAgo(c.created_at)}</small><form method="post" action="/report/${c.id}" class="report"><button>Report</button></form></div></div>`).join('')||'<p class="muted">A fresh page, ready for ideas.</p>';
-  page(res,200,p.title,`<main class="shell article-shell"><a class="back" href="/">← Back to the Commons</a><div class="article-head"><div class="eyebrow">A COMMUNITY PAGE · STARTED BY ${esc(p.display_name||'THE COMMUNITY').toUpperCase()}</div><h1>${esc(p.title)}</h1></div><article class="article-body">${renderText(p.body)}</article><section class="add-to-page"><div class="eyebrow">ADD TO THIS PAGE</div><h2>Make it a little more ours.</h2><form class="prompt" method="post" action="/contribute"><input type="hidden" name="page" value="${esc(p.slug)}"><span class="prompt-spark">✳</span><input name="idea" maxlength="500" required placeholder="What would you like to add here?"><button>Send <span>↗</span></button></form></section><section class="page-history"><div class="eyebrow">PAGE HISTORY</div><div class="feed">${h}</div></section></main>`,req.session.user);
+  page(res,200,p.title,`<main class="shell article-shell"><a class="back" href="/">← Back to the Commons</a><div class="article-head"><div class="eyebrow">A COMMUNITY PAGE · STARTED BY ${esc(p.display_name||'THE COMMUNITY').toUpperCase()}</div><h1>${esc(p.title)}</h1></div><article class="article-body">${renderText(p.body)}</article><section class="add-to-page"><div class="eyebrow">ADD TO THIS PAGE</div><h2>Make it a little more ours.</h2><form class="prompt" method="post" action="/contribute"><input type="hidden" name="page" value="${esc(p.slug)}"><span class="prompt-spark">✳</span><input name="idea" maxlength="500" required placeholder="What would you like to add here?"><button>Send <span>↗</span></button></form></section><section class="page-history"><div class="eyebrow">PAGE HISTORY</div><div class="feed">${h}</div></section></main>`);
 });
 
-app.post('/contribute',auth,async(req,res)=>{
+app.post('/contribute',async(req,res)=>{
   const idea=String(req.body.idea||'').trim().slice(0,500); if(!idea){flash(req,'notice','Add an idea first.');return res.redirect('/');}
   const requestedSlug=String(req.body.page||'').trim();
   if(requestedSlug){
@@ -88,17 +68,17 @@ app.post('/contribute',auth,async(req,res)=>{
     if(!rows[0]){flash(req,'notice','That page is no longer available.');return res.redirect('/');}
     const body=rows[0].body + (rows[0].body?'\n\n':'') + idea;
     await pool.query('UPDATE pages SET body=$1,updated_at=now() WHERE id=$2',[body,rows[0].id]);
-    const {rows:cr}=await pool.query('INSERT INTO contributions(member_id,page_id,action,summary) VALUES($1,$2,$3,$4) RETURNING id',[req.session.user.id,rows[0].id,'edit',`added to ${rows[0].title}`]);
+    const {rows:cr}=await pool.query('INSERT INTO contributions(member_id,page_id,action,summary) VALUES($1,$2,$3,$4) RETURNING id',[null,rows[0].id,'edit',`added to ${rows[0].title}`]);
     flash(req,'notice','Your addition is live for everyone.');return res.redirect(`/p/${encodeURIComponent(requestedSlug)}#contribution-${cr[0].id}`);
   }
   const title=makeTitle(idea); let slug=slugify(title), suffix=1;
   while((await pool.query('SELECT 1 FROM pages WHERE slug=$1',[slug])).rows.length) slug=`${slugify(title)}-${++suffix}`;
-  const {rows}=await pool.query('INSERT INTO pages(slug,title,body,created_by) VALUES($1,$2,$3,$4) RETURNING id',[slug,title,idea,req.session.user.id]);
-  const {rows:cr}=await pool.query('INSERT INTO contributions(member_id,page_id,action,summary) VALUES($1,$2,$3,$4) RETURNING id',[req.session.user.id,rows[0].id,'create',`started ${title}`]);
+  const {rows}=await pool.query('INSERT INTO pages(slug,title,body,created_by) VALUES($1,$2,$3,$4) RETURNING id',[slug,title,idea,null]);
+  const {rows:cr}=await pool.query('INSERT INTO contributions(member_id,page_id,action,summary) VALUES($1,$2,$3,$4) RETURNING id',[null,rows[0].id,'create',`started ${title}`]);
   flash(req,'notice','Your new page is live for everyone.');res.redirect(`/p/${encodeURIComponent(slug)}#contribution-${cr[0].id}`);
 });
-app.post('/report/:id',auth,async(req,res)=>{
-  const id=Number(req.params.id); if(Number.isInteger(id)) await pool.query('INSERT INTO reports(member_id,contribution_id,reason) VALUES($1,$2,$3)',[req.session.user.id,id,'community report']);
+app.post('/report/:id',async(req,res)=>{
+  const id=Number(req.params.id); if(Number.isInteger(id)) await pool.query('INSERT INTO reports(member_id,contribution_id,reason) VALUES($1,$2,$3)',[null,id,'community report']);
   flash(req,'notice','Thanks. Your report has been sent to the community moderators.');res.redirect('back');
 });
 
