@@ -15,7 +15,6 @@
   const endNote = document.querySelector('.history-end');
   if (!form || !input || !button || !bubble || !popup) return;
 
-  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const requesterStorageKey = 'commons-requester-id';
   function newRequesterId() {
     if (window.crypto?.randomUUID) return window.crypto.randomUUID();
@@ -42,29 +41,7 @@
     toast.classList.add('is-visible');
     toastTimer = window.setTimeout(() => toast.classList.remove('is-visible'), 2200);
   }
-  async function watchBuild(statusUrl) {
-    for (;;) {
-      await sleep(2200);
-      try {
-        const response = await fetch(statusUrl, { cache: 'no-store' });
-        if (!response.ok) continue;
-        const status = await response.json();
-        if (status.state === 'done') {
-          await refreshCanvas();
-          refreshActive();
-          if (loadedHistory) loadHistory(true);
-          return;
-        }
-        if (status.state === 'failed') {
-          refreshActive();
-          if (loadedHistory) loadHistory(true);
-          showToast(status.message || 'Could not build that change', 'error');
-          return;
-        }
-      } catch { /* Keep checking; the queue itself remains the source of truth. */ }
-    }
-  }
-  async function refreshCanvas() {
+  async function refreshCanvas(expectedRevision) {
     try {
       const response = await fetch('/', { cache: 'no-store' });
       if (!response.ok) return;
@@ -72,7 +49,10 @@
       const documentCopy = new DOMParser().parseFromString(html, 'text/html');
       const updatedFrame = documentCopy.querySelector('#canvas-frame');
       const currentFrame = document.querySelector('#canvas-frame');
-      if (updatedFrame && currentFrame) currentFrame.srcdoc = updatedFrame.srcdoc;
+      if (!updatedFrame || !currentFrame || updatedFrame.dataset.revision === currentFrame.dataset.revision) return;
+      if (expectedRevision && expectedRevision !== updatedFrame.dataset.revision) return;
+      currentFrame.dataset.revision = updatedFrame.dataset.revision;
+      currentFrame.srcdoc = updatedFrame.srcdoc;
     } catch { /* A later page visit will show the latest saved canvas. */ }
   }
   function friendlyStatus(request) {
@@ -212,6 +192,80 @@
       }, { root: scrollBox, rootMargin: '100px' })
     : null;
   historyObserver?.observe(sentinel);
+
+  const pendingRequests = new Map();
+  let fallbackTimer = null;
+  function startFallback() {
+    if (fallbackTimer) return;
+    fallbackTimer = window.setInterval(async () => {
+      refreshActive();
+      reconcilePendingRequests();
+      try {
+        const response = await fetch('/api/site/revision', { cache: 'no-store' });
+        if (response.ok) {
+          const data = await response.json();
+          const frame = document.querySelector('#canvas-frame');
+          if (frame && String(data.revision) !== frame.dataset.revision) refreshCanvas(String(data.revision));
+        }
+      } catch { /* Retry on the next fallback tick. */ }
+    }, 5000);
+  }
+  function stopFallback() {
+    if (fallbackTimer) window.clearInterval(fallbackTimer);
+    fallbackTimer = null;
+  }
+  function finishPendingRequest(requestId, state) {
+    if (!pendingRequests.delete(requestId)) return;
+    if (state === 'failed') showToast('Could not build that change', 'error');
+  }
+  async function reconcilePendingRequests() {
+    await Promise.all([...pendingRequests].map(async ([requestId, statusUrl]) => {
+      try {
+        const response = await fetch(statusUrl, { cache: 'no-store' });
+        if (!response.ok) return;
+        const status = await response.json();
+        if (status.state === 'done' || status.state === 'failed') finishPendingRequest(requestId, status.state);
+      } catch { /* The EventSource will retry and reconcile again when it reconnects. */ }
+    }));
+  }
+  function refreshForSnapshot(data = {}) {
+    refreshActive();
+    if (loadedHistory) loadHistory(true);
+    const frame = document.querySelector('#canvas-frame');
+    if (data.revision && frame && String(data.revision) !== frame.dataset.revision) refreshCanvas(String(data.revision));
+    reconcilePendingRequests();
+  }
+  function handleLiveUpdate(data) {
+    if (data.type === 'snapshot') {
+      if (data.live) stopFallback();
+      refreshForSnapshot(data);
+    } else if (data.type === 'site') {
+      refreshCanvas(String(data.revision || ''));
+    } else if (data.type === 'queue') {
+      refreshActive();
+      if ((data.status === 'done' || data.status === 'failed') && loadedHistory) loadHistory(true);
+      if (data.requestId && (data.status === 'done' || data.status === 'failed')) finishPendingRequest(data.requestId, data.status);
+    }
+  }
+  let eventStream = null;
+  if ('EventSource' in window) {
+    eventStream = new EventSource('/api/events');
+    eventStream.addEventListener('ready', event => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.live) stopFallback(); else startFallback();
+        refreshForSnapshot(data);
+      }
+      catch { refreshForSnapshot(); }
+    });
+    eventStream.addEventListener('update', event => {
+      try { handleLiveUpdate(JSON.parse(event.data)); }
+      catch { refreshForSnapshot(); }
+    });
+    eventStream.addEventListener('error', () => {
+      startFallback();
+    });
+  }
   function popupOpen() { return popup.classList.contains('is-open'); }
   function openPopup() {
     popup.classList.add('is-open');
@@ -235,7 +289,7 @@
     if (popupOpen() && !popup.contains(event.target) && !bubble.contains(event.target)) closePopup();
   });
   refreshActive();
-  window.setInterval(refreshActive, 2500);
+  if (!eventStream) startFallback();
 
   let submitting = false;
   form.addEventListener('submit', async event => {
@@ -255,8 +309,10 @@
       if (!response.ok) throw new Error(data.message || 'Could not queue that request. Try again.');
       input.value = '';
       showToast('Added to queue');
+      const requestId = data.statusUrl.split('/').pop();
+      pendingRequests.set(requestId, data.statusUrl);
       await invalidateQueue();
-      void watchBuild(data.statusUrl);
+      reconcilePendingRequests();
     } catch (error) {
       showToast(error.message || 'Could not add that request', 'error');
     } finally {

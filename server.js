@@ -1,14 +1,19 @@
 const express = require('express');
-const { Pool } = require('pg');
+const { Pool, Client } = require('pg');
 const path = require('node:path');
 
 const app = express();
 const port = process.env.PORT || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('railway.internal') ? false : { rejectUnauthorized: false } });
+const postgresOptions = { connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('railway.internal') ? false : { rejectUnauthorized: false }, keepAlive: true };
 const { randomUUID } = require('node:crypto');
 const MAX_SITE_CODE = 150000;
 const MAX_PENDING_BUILDS = 50;
 const WORKER_LOCK_NAMESPACE = 824611;
+const eventClients = new Set();
+let notificationClient = null;
+let notificationConnecting = false;
+let notificationRetryTimer = null;
 const EMPTY_SITE_CODE = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>The Commons</title></head><body></body></html>';
 
 app.set('trust proxy', 1);
@@ -97,8 +102,8 @@ async function initDb() {
   await pool.query('INSERT INTO commons_site(id,code) VALUES(1,$1) ON CONFLICT(id) DO NOTHING', [EMPTY_SITE_CODE]);
 }
 
-function renderCanvas(code, error='') {
-  const frame = `<iframe id="canvas-frame" title="Shared website" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${escapeAttr(lockHtml(code))}"></iframe>`;
+function renderCanvas(code, error='', revision='0') {
+  const frame = `<iframe id="canvas-frame" data-revision="${escapeAttr(revision)}" title="Shared website" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${escapeAttr(lockHtml(code))}"></iframe>`;
   return shell(`<main id="canvas">${frame}</main><aside class="queue-ui"><section class="queue-popup" id="queue-popup" aria-label="Community requests" aria-hidden="true" inert><header class="queue-header"><h2>Community requests</h2><button class="queue-close" type="button" aria-label="Close requests">×</button></header><div class="queue-scroll"><section class="queue-group"><h3>In the queue</h3><ol class="active-list"><li class="queue-empty">Loading…</li></ol></section><section class="queue-group"><h3>Recent requests</h3><ol class="history-list"></ol></section><p class="history-loading" hidden>Loading more…</p><p class="history-end" hidden>You’re all caught up.</p><div class="history-sentinel"></div></div></section><button class="queue-bubble" type="button" aria-expanded="false" aria-controls="queue-popup"><span>Queue</span><span class="queue-count" aria-label="Active requests">0</span></button></aside><form class="prompt" method="post" action="/contribute"><input name="idea" maxlength="2000" required placeholder="${escapeAttr(error || 'Add or change anything on the shared site…')}" aria-label="Describe what to build"><button aria-label="Build">↗</button></form><div class="toast" role="status" aria-live="polite" aria-atomic="true"></div>`);
 }
 
@@ -106,6 +111,25 @@ app.get('/health', (_req,res) => res.send('ok'));
 app.get('/style.css', (_req,res) => res.type('text/css').send(css));
 app.get('/app.js', (_req,res) => res.sendFile(path.join(__dirname,'public','app.js')));
 app.get('/contribute', (_req,res) => res.redirect(303,'/'));
+app.get('/api/events', async (req,res) => {
+  res.status(200).set({
+    'Content-Type':'text/event-stream; charset=utf-8',
+    'Cache-Control':'no-cache, no-transform',
+    'Connection':'keep-alive',
+    'X-Accel-Buffering':'no'
+  });
+  res.flushHeaders();
+  eventClients.add(res);
+  const heartbeat=setInterval(()=>{ if(!res.write(': keep-alive\n\n'))res.destroy(); },20000);
+  res.on('close',()=>{ clearInterval(heartbeat);eventClients.delete(res); });
+  try {
+    const {rows}=await pool.query('SELECT revision FROM commons_site WHERE id=1');
+    if(!res.destroyed)res.write(`retry: 3000\n\nevent: ready\ndata: ${JSON.stringify({revision:rows[0]?.revision||'0',live:Boolean(notificationClient)})}\n\n`);
+  } catch(error) {
+    console.error('Could not read live event snapshot:',error);
+    if(!res.destroyed)res.write(`retry: 3000\n\nevent: ready\ndata: ${JSON.stringify({live:Boolean(notificationClient)})}\n\n`);
+  }
+});
 app.get('/api/requests/status', async (_req,res) => {
   try {
     const {rows}=await pool.query(`SELECT r.id,r.idea,r.requester_id,r.requester_label,r.status,r.error,r.created_at,r.started_at,r.completed_at,
@@ -115,6 +139,12 @@ app.get('/api/requests/status', async (_req,res) => {
     const {rows:[count]}=await pool.query("SELECT COUNT(*)::int AS count FROM commons_requests WHERE status IN ('queued','building')");
     res.set('Cache-Control','no-store').json({requests:rows,pendingCount:count.count});
   } catch(e) { console.error('Could not load request list:',e);res.status(500).json({message:'Could not load the request list.'}); }
+});
+app.get('/api/site/revision', async (_req,res) => {
+  try {
+    const {rows}=await pool.query('SELECT revision FROM commons_site WHERE id=1');
+    res.set('Cache-Control','no-store').json({revision:rows[0]?.revision||'0'});
+  } catch(error) { console.error('Could not read site revision:',error);res.status(500).json({message:'Could not read the site revision.'}); }
 });
 app.get('/api/requests', async (req,res) => {
   try {
@@ -147,7 +177,7 @@ app.get('/builds/:id', async (req,res) => {
   } catch(e) { console.error('Could not read request status:',e);res.status(500).json({state:'failed',message:'Could not check request status.'}); }
 });
 app.get('/',async(req,res)=>{
-  try { const {rows}=await pool.query('SELECT code FROM commons_site WHERE id=1');res.type('html').send(renderCanvas(rows[0]?.code||EMPTY_SITE_CODE,errorText(req.query.error))); }
+  try { const {rows}=await pool.query('SELECT code,revision FROM commons_site WHERE id=1');res.type('html').send(renderCanvas(rows[0]?.code||EMPTY_SITE_CODE,errorText(req.query.error),rows[0]?.revision||'0')); }
   catch(e){console.error(e);res.status(500).type('html').send(renderCanvas(EMPTY_SITE_CODE,'The canvas is loading — try again'));}
 });
 
@@ -168,6 +198,7 @@ app.post('/contribute',async(req,res,next)=>{
     else {
       const requesterLabel=`Guest ${requesterId.replaceAll('-','').slice(0,4).toUpperCase()}`;
       await client.query('INSERT INTO commons_requests(id,idea,requester_id,requester_label) VALUES($1,$2,$3,$4)',[id,idea,requesterId,requesterLabel]);
+      await publishEvent(client,{type:'queue',requestId:id,status:'queued'});
     }
     await client.query(full?'ROLLBACK':'COMMIT');
   } catch(e) { await client.query('ROLLBACK');throw e; }
@@ -179,6 +210,53 @@ app.post('/contribute',async(req,res,next)=>{
 
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 
+async function publishEvent(client,event){
+  await client.query('SELECT pg_notify($1,$2)',['commons_events',JSON.stringify(event)]);
+}
+
+function broadcastEvent(payload){
+  const message=`event: update\ndata: ${payload}\n\n`;
+  for(const client of eventClients){
+    try { if(!client.write(message)){client.destroy();eventClients.delete(client);} }
+    catch { eventClients.delete(client); }
+  }
+}
+
+function scheduleNotificationReconnect(){
+  if(notificationRetryTimer)return;
+  notificationRetryTimer=setTimeout(()=>{notificationRetryTimer=null;connectNotificationListener();},2500);
+  notificationRetryTimer.unref?.();
+}
+
+async function connectNotificationListener(){
+  if(notificationConnecting||notificationClient||!process.env.DATABASE_URL)return;
+  notificationConnecting=true;
+  const client=new Client(postgresOptions);
+  const disconnected=error=>{
+    if(notificationClient!==client)return;
+    notificationClient=null;
+    if(error)console.error('Commons event listener disconnected:',error);
+    client.end().catch(()=>{});
+    scheduleNotificationReconnect();
+  };
+  client.on('notification',message=>{if(message.channel==='commons_events'&&message.payload)broadcastEvent(message.payload);});
+  client.on('error',disconnected);
+  client.on('end',()=>disconnected());
+  try {
+    await client.connect();
+    await client.query('LISTEN commons_events');
+    notificationClient=client;
+    const {rows}=await client.query('SELECT revision FROM commons_site WHERE id=1');
+    broadcastEvent(JSON.stringify({type:'snapshot',revision:rows[0]?.revision||'0',live:true}));
+    console.log('Commons live event listener connected');
+  } catch(error) {
+    console.error('Could not connect Commons live event listener:',error);
+    if(notificationClient===client)notificationClient=null;
+    client.end().catch(()=>{});
+    scheduleNotificationReconnect();
+  } finally { notificationConnecting=false; }
+}
+
 async function claimNextBuild(){
   const client=await pool.connect();
   try {
@@ -186,6 +264,7 @@ async function claimNextBuild(){
     const {rows}=await client.query("SELECT id,idea FROM commons_requests WHERE status='queued' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED");
     if(!rows.length){await client.query('COMMIT');return null;}
     await client.query("UPDATE commons_requests SET status='building',started_at=now() WHERE id=$1",[rows[0].id]);
+    await publishEvent(client,{type:'queue',requestId:rows[0].id,status:'building'});
     await client.query('COMMIT');
     return rows[0];
   } catch(e) { await client.query('ROLLBACK');throw e; }
@@ -201,7 +280,8 @@ async function runBuildWorker(){
       locked=rows[0].acquired;
       if(!locked){lockClient.release();lockClient=null;await delay(2500);continue;}
       console.log('Commons build worker acquired its database lock');
-      await pool.query("UPDATE commons_requests SET status='queued',started_at=NULL WHERE status='building'");
+      const reset=await pool.query("UPDATE commons_requests SET status='queued',started_at=NULL WHERE status='building'");
+      if(reset.rowCount)await publishEvent(pool,{type:'queue',status:'queued'});
       while(true){
         const job=await claimNextBuild();
         if(!job){await delay(1200);continue;}
@@ -231,7 +311,11 @@ async function processBuild(job){
     try {
       await client.query('BEGIN');
       const saved=await client.query('UPDATE commons_site SET code=$1,revision=revision+1,updated_at=now() WHERE id=1 AND revision=$2 RETURNING revision',[code,current.revision]);
-      if(saved.rowCount)await client.query("UPDATE commons_requests SET status='done',error=NULL,completed_at=now() WHERE id=$1",[job.id]);
+      if(saved.rowCount){
+        await client.query("UPDATE commons_requests SET status='done',error=NULL,completed_at=now() WHERE id=$1",[job.id]);
+        await publishEvent(client,{type:'site',revision:saved.rows[0].revision});
+        await publishEvent(client,{type:'queue',requestId:job.id,status:'done'});
+      }
       await client.query('COMMIT');
       if(saved.rowCount)return;
     } catch(e) { await client.query('ROLLBACK');throw e; }
@@ -240,7 +324,10 @@ async function processBuild(job){
   }catch(e){
     console.error('AI build failed:',e);
     const message=e.publicCode==='auth'?'The AI connection needs attention. Please try again later.':e.publicCode==='busy'?e.message:'Could not build that. Your prompt is still here — try again.';
-    try { await pool.query("UPDATE commons_requests SET status='failed',error=$2,completed_at=now() WHERE id=$1",[job.id,message]); }
+    try {
+      const failed=await pool.query("UPDATE commons_requests SET status='failed',error=$2,completed_at=now() WHERE id=$1 AND status='building' RETURNING id",[job.id,message]);
+      if(failed.rowCount)await publishEvent(pool,{type:'queue',requestId:job.id,status:'failed'});
+    }
     catch(updateError) { console.error('Could not mark request as failed:',updateError); }
   }
 }
@@ -276,7 +363,8 @@ function lockHtml(code){
 }
 
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).send('Something went wrong.');});
-initDb().then(()=>{
+initDb().then(async()=>{
+  await connectNotificationListener();
   app.listen(port,()=>console.log(`Commons listening on ${port}`));
   runBuildWorker();
 }).catch(e=>{console.error('Database startup failed:',e);process.exit(1);});
