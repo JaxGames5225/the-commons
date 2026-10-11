@@ -4,6 +4,8 @@ The Commons is one shared website edited by everyone through a floating prompt. 
 
 Requests to create subpages are implemented as sections and hash navigation inside that same document. Concurrent edits use a revision check and regenerate against the latest saved version so one submission does not silently erase another.
 
+Prompt submissions stay on the main page. A small in-memory queue lets two builds run at once and holds up to 30 more, showing queued/building status in the prompt. Requests are no longer cut off after 12 prompts from the same IP in an hour. A direct visit to the old `/contribute` path returns to the main page.
+
 ## Run locally
 
 1. Install Node.js 20+ and PostgreSQL.

@@ -4,7 +4,14 @@ const { Pool } = require('pg');
 const app = express();
 const port = process.env.PORT || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('railway.internal') ? false : { rejectUnauthorized: false } });
+const { randomUUID } = require('node:crypto');
 const MAX_SITE_CODE = 150000;
+const MAX_ACTIVE_BUILDS = 2;
+const MAX_QUEUED_BUILDS = 30;
+const JOB_TTL_MS = 30 * 60 * 1000;
+const buildQueue = [];
+const buildJobs = new Map();
+let activeBuilds = 0;
 
 app.set('trust proxy', 1);
 app.use(express.urlencoded({ extended: false, limit: '160kb' }));
@@ -14,7 +21,7 @@ const css = `*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;o
 const shell = content => `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>The Commons</title><style>${css}</style></head><body>${content}<script src="/app.js" defer></script></body></html>`;
 
 function errorText(code) {
-  return ({key:'AI key needed — add OPENAI_API_KEY in Railway Variables',auth:'AI key is invalid — check OPENAI_API_KEY in Railway Variables',limit:'Please wait a little before building again',busy:'The builder is busy or the shared site is too large — try again shortly',failed:'Could not build that. Try again'})[code] || '';
+  return ({key:'AI key needed — add OPENAI_API_KEY in Railway Variables',auth:'AI key is invalid — check OPENAI_API_KEY in Railway Variables',busy:'The builder is busy or the shared site is too large — try again shortly',failed:'Could not build that. Try again'})[code] || '';
 }
 
 function initialSiteCode(legacyPages) {
@@ -60,43 +67,70 @@ function renderCanvas(code, error='') {
 
 app.get('/health', (_req,res) => res.send('ok'));
 app.get('/style.css', (_req,res) => res.type('text/css').send(css));
-app.get('/app.js', (_req,res) => res.type('application/javascript').send(`document.querySelector('.prompt')?.addEventListener('submit',()=>{const b=document.querySelector('.prompt button'),i=document.querySelector('.prompt input[name=idea]');if(b){b.disabled=true;b.textContent='…'}if(i)i.readOnly=true});`));
+app.get('/app.js', (_req,res) => res.type('application/javascript').send(`(()=>{const form=document.querySelector('.prompt'),input=form?.querySelector('input[name=idea]'),button=form?.querySelector('button');if(!form||!input||!button)return;const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));function restore(idea,message){input.readOnly=false;input.value=idea;input.placeholder=message;button.disabled=false;button.textContent='↗';input.focus()}form.addEventListener('submit',async event=>{event.preventDefault();if(button.disabled)return;const idea=input.value.trim();if(!idea)return;button.disabled=true;button.textContent='…';input.readOnly=true;input.value='';input.placeholder='Sending to the Commons…';try{const response=await fetch(form.action,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},body:new URLSearchParams({idea})});const data=await response.json();if(!response.ok)throw new Error(data.message||'Could not queue that request. Try again.');input.placeholder='Queued — building your change…';for(;;){await sleep(1800);const statusResponse=await fetch(data.statusUrl,{headers:{'Accept':'application/json'},cache:'no-store'});if(!statusResponse.ok)throw new Error('Could not check the build status. Your prompt is still here.');const status=await statusResponse.json();if(status.state==='queued')input.placeholder=status.position>1?'Queued — '+status.position+' builds ahead…':'Queued — building your change…';else if(status.state==='building')input.placeholder='Building your change…';else if(status.state==='done'){window.location.replace('/');return}else if(status.state==='failed')throw new Error(status.message||'Could not build that. Try again.')}}catch(error){restore(idea,error.message||'Could not build that. Try again.')}})})();`));
+app.get('/contribute', (_req,res) => res.redirect(303,'/'));
+app.get('/builds/:id', (req,res) => {
+  const job=buildJobs.get(req.params.id);
+  if(!job)return res.status(404).json({state:'failed',message:'That build expired. Please send the request again.'});
+  if(job.state==='queued')return res.json({state:job.state,position:buildQueue.indexOf(job)+1});
+  res.json({state:job.state,message:job.message});
+});
 app.get('/',async(req,res)=>{
   try { const {rows}=await pool.query('SELECT code FROM commons_site WHERE id=1');res.type('html').send(renderCanvas(rows[0]?.code||initialSiteCode([]),errorText(req.query.error))); }
   catch(e){console.error(e);res.status(500).type('html').send(renderCanvas(initialSiteCode([]),'The canvas is loading — try again'));}
 });
 
-const promptHits = new Map();
 app.post('/contribute',async(req,res)=>{
   const idea=String(req.body.idea||'').trim().slice(0,2000);
-  if(!idea)return res.redirect('/');
-  const ip=String(req.ip||req.socket.remoteAddress||'unknown'), now=Date.now(), hit=(promptHits.get(ip)||[]).filter(t=>now-t<60*60*1000);
-  if(hit.length>=12)return res.redirect('/?error=limit');
-  hit.push(now);promptHits.set(ip,hit);
+  if(!idea)return res.status(400).json({message:'Type something to add or change first.'});
+  if(!process.env.OPENAI_API_KEY)return res.status(503).json({message:errorText('key')});
+  buildJobs.forEach((job,id)=>{if(Date.now()-job.createdAt>JOB_TTL_MS&&job.state!=='queued'&&job.state!=='building')buildJobs.delete(id);});
+  if(buildQueue.length>=MAX_QUEUED_BUILDS)return res.status(503).json({message:'The Commons is busy right now. Your request is still in the box — try sending it again in a moment.'});
+  const job={id:randomUUID(),idea,createdAt:Date.now(),state:'queued',message:''};
+  buildJobs.set(job.id,job);buildQueue.push(job);drainBuildQueue();
+  res.status(202).json({statusUrl:`/builds/${job.id}`});
+});
+
+function drainBuildQueue(){
+  while(activeBuilds<MAX_ACTIVE_BUILDS&&buildQueue.length){
+    const job=buildQueue.shift();activeBuilds++;job.state='building';
+    processBuild(job).finally(()=>{activeBuilds--;drainBuildQueue();});
+  }
+}
+
+async function processBuild(job){
   try{
-    if(!process.env.OPENAI_API_KEY)return res.redirect('/?error=key');
-    // Optimistic revision checks keep simultaneous edits from silently overwriting one another.
-    for(let attempt=0;attempt<3;attempt++){
+    // Rebuild against the newest revision after a concurrent edit wins the save race.
+    for(let attempt=0;attempt<5;attempt++){
       const {rows}=await pool.query('SELECT code,revision FROM commons_site WHERE id=1');
       const current=rows[0];
-      if(!current)return res.redirect('/?error=failed');
-      if(current.code.length>MAX_SITE_CODE)return res.redirect('/?error=busy');
-      const code=await generateSite(idea,current.code);
-      if(code.length>MAX_SITE_CODE)return res.redirect('/?error=busy');
+      if(!current)throw new Error('The shared website is not ready. Please try again.');
+      if(current.code.length>MAX_SITE_CODE)throw Object.assign(new Error(errorText('busy')),{publicCode:'busy'});
+      const code=await generateSite(job.idea,current.code);
+      if(code.length>MAX_SITE_CODE)throw Object.assign(new Error(errorText('busy')),{publicCode:'busy'});
       const saved=await pool.query('UPDATE commons_site SET code=$1,revision=revision+1,updated_at=now() WHERE id=1 AND revision=$2 RETURNING revision',[code,current.revision]);
-      if(saved.rowCount)return res.redirect('/');
+      if(saved.rowCount){job.state='done';job.message='';return;}
     }
-    res.redirect('/?error=busy');
-  }catch(e){console.error('AI build failed:',e);res.redirect(`/?error=${e.publicCode||'failed'}`);}
-});
+    throw Object.assign(new Error('Lots of people are editing right now. Please try your request again.'),{publicCode:'busy'});
+  }catch(e){
+    console.error('AI build failed:',e);
+    job.state='failed';job.message=e.publicCode==='auth'?'The AI connection needs attention. Please try again later.':e.publicCode==='busy'?e.message:'Could not build that. Your prompt is still here — try again.';
+  }
+}
 
 async function generateSite(idea,currentCode){
   const schema={type:'object',additionalProperties:false,properties:{html:{type:'string'}},required:['html']};
   const systemPrompt=`You are editing The Commons, one shared website collaboratively changed by all visitors. The current website source is the complete shared state. The visitor's request is an edit instruction: you may add, move, rewrite, or remove any part of the existing site so it best satisfies that request. Anyone may change anyone else's work; don't preserve sections just because somebody else made them.
 
-Return the COMPLETE website as one valid HTML document, including <!doctype html>, <html>, <head>, and <body>. Do not return a patch or explanation. Keep styling nearly absent by default: use plain browser-default HTML, no colors, cards, decorative spacing, animations, or visual polish unless the visitor explicitly requests styling/design. Prioritize the requested content and behavior. Preserve unrelated existing content where practical.
+Return the COMPLETE website as one valid HTML document, including <!doctype html>, <html>, <head>, and <body>. Do not return a patch or explanation. Keep styling nearly absent by default: use plain browser-default HTML, no colors, cards, decorative spacing, animations, or visual polish unless the visitor explicitly requests styling/design. Prioritize the requested content and behavior.
 
-The website is stored as this single document, so implement subpages or navigation as in-document sections and hash links (for example href="#about") with any needed client-side behavior in the same document. Do not use server routes. Use only inline HTML, CSS, and JavaScript; no external assets, fonts, scripts, network requests, forms that submit, or tracking. Keep scripts self-contained. The output runs in a sandboxed iframe without access to the host page, cookies, storage, or network. Do not add credential collection or payment flows.`;
+Editing rules:
+- If the visitor asks to change something that already exists, find and edit that part instead of making a duplicate.
+- If they ask for another page, create a distinct in-document page section with a stable, unique id and add a clear link to it from a relevant existing page.
+- Treat those sections as subpages: use hash links such as href="#page-about" and make navigation work without a server route. If the site already has a page/navigation pattern, extend that pattern.
+- Keep unrelated existing pages and working features intact. Anyone may edit or remove any part of the shared website when their request calls for it.
+
+The whole website is stored as this single document. Use only inline HTML, CSS, and JavaScript; no external assets, fonts, scripts, network requests, forms that submit, or tracking. Keep scripts self-contained. The output runs in a sandboxed iframe without access to the host page, cookies, storage, or network. Do not add credential collection or payment flows.`;
   const response=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:`Bearer ${process.env.OPENAI_API_KEY}`,'Content-Type':'application/json'},signal:AbortSignal.timeout(60000),body:JSON.stringify({model:process.env.OPENAI_MODEL||'gpt-6-astra',store:false,max_output_tokens:12000,input:[{role:'system',content:systemPrompt},{role:'user',content:`CURRENT COMPLETE WEBSITE SOURCE:\n${currentCode}\n\nREQUESTED EDIT:\n${idea}`}],text:{format:{type:'json_schema',name:'commons_site_edit',strict:true,schema}}})});
   if(!response.ok){const detail=await response.text();console.error('OpenAI response:',response.status,detail.slice(0,1000));const e=new Error('OpenAI request failed');e.publicCode=response.status===401?'auth':response.status===429?'busy':'failed';throw e;}
   const payload=await response.json();
