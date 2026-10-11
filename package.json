@@ -4,10 +4,15 @@
   "private": true,
   "description": "A shared, community-built website",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "express": "^4.21.2",
+    "parse5": "^7.3.0",
     "pg": "^8.13.1"
   }
 }
