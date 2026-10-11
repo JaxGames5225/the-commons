@@ -1,0 +1,16 @@
+{
+  "name": "the-commons",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A shared, community-built website",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^10.0.0",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "pg": "^8.13.1"
+  }
+}
