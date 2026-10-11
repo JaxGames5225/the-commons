@@ -79,8 +79,18 @@ async function generatePage(idea,current){
 
 Build this: ${idea}`}],text:{format:{type:'json_schema',name:'commons_build',strict:true,schema}}})});
   if(!response.ok){const detail=await response.text();console.error('OpenAI response:',response.status,detail.slice(0,1000));const e=new Error('OpenAI request failed');e.publicCode=response.status===401?'auth':response.status===429?'busy':'failed';throw e;}
-  const payload=await response.json();if(!payload.output_text)throw new Error('No generated HTML returned');
-  const result=JSON.parse(payload.output_text);result.title=String(result.title||'A new page').trim().slice(0,100)||'A new page';result.summary=String(result.summary||'').slice(0,180);result.html=String(result.html||'').trim().replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'');
+  const payload=await response.json();
+  // `output_text` is an SDK convenience property; the raw Responses API returns
+  // the text in output[].content[].text instead.
+  const outputText=payload.output_text||payload.output?.flatMap(item=>item.content||[])
+    .filter(part=>part.type==='output_text'&&typeof part.text==='string')
+    .map(part=>part.text).join('');
+  if(!outputText){
+    const reason=payload.incomplete_details?.reason||payload.error?.message||payload.status||'no text output';
+    console.error('OpenAI returned no output text:',reason,JSON.stringify(payload.output||[]).slice(0,1200));
+    throw new Error(`No generated HTML returned (${reason})`);
+  }
+  const result=JSON.parse(outputText);result.title=String(result.title||'A new page').trim().slice(0,100)||'A new page';result.summary=String(result.summary||'').slice(0,180);result.html=String(result.html||'').trim().replace(/^```(?:html)?\s*/i,'').replace(/\s*```$/,'');
   if(!result.html||result.html.length>30000||/<\/?(?:html|head|body)\b/i.test(result.html))throw new Error('Invalid HTML fragment returned');
   return result;
 }
