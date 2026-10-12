@@ -464,11 +464,12 @@ How to work:
 - Finish with a short JSON summary of what you changed. Do not include HTML in that final response.
 
 Site rules:
-- Anyone may edit anyone else's work; satisfy the current request rather than preserving a section just because somebody else made it.
+- Anyone may edit anyone else's work, but respect the preservation rules below.
 - The site is one HTML document. Pages and subcommunities are in-document sections with native hash links, not server routes or separate files.
 - Create readable section ids, clear headings, short descriptions, and visible links. Reuse the shared nav; don't make duplicate navigation bars. Ordinary edits belong in the most relevant existing section.
-- Preserve unrelated sections and existing behavior. Don't imply separate membership, permissions, databases, or moderation tools exist unless they have actually been built in the document.
-- Keep styling nearly absent by default: use plain browser-default HTML, no colors, cards, decorative spacing, animations, or visual polish unless the visitor explicitly requests design or styling.
+- Preserve existing work by default. Never delete a section, page, content, link, or behavior unless the user explicitly asks for it to be removed. When editing, keep existing material outside the requested change; prefer adding or reshaping around it over replacing it wholesale. If a request seems to require removing existing work, preserve it and find another approach unless deletion was explicit.
+- Make the site feel lively and distinctive by default. Give new pages and substantial additions a fun, memorable visual identity with thoughtful color, typography, layout, and small details. Let communities have their own personality while keeping the experience readable, responsive, accessible, and coherent with the rest of the site. Avoid generic template styling; use plain/minimal styling only when the user asks for it or it clearly fits the request.
+- Don't imply separate membership, permissions, databases, or moderation tools exist unless they have actually been built in the document.
 - Use only inline HTML, CSS, and self-contained JavaScript; no external assets, fonts, scripts, network requests, form submissions, or tracking. The page runs in a sandboxed iframe without host-page, cookie, storage, or network access. Do not add credential collection or payment flows.`;
   const tools=[
     {type:'function',name:'list_sections',description:'List page and subcommunity ids, summaries, and their current inclusive line ranges.',parameters:{type:'object',properties:{},required:[],additionalProperties:false},strict:true},
